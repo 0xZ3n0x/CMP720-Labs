@@ -329,8 +329,19 @@ void i2c_write_register(uint8_t dev_addr, uint8_t reg_addr, uint8_t value) {
  *   value = i2c_read_register(SENSOR_I2C_ADDR, register);
  * ============================================================ */
 uint8_t read_vitals(void) {
-    // TODO: Your code here
-    return 0;
+    // Verify sensor is present
+    uint8_t sensor_id = i2c_read_register(SENSOR_I2C_ADDR, SENSOR_REG_ID);
+    if (sensor_id != 0xA5) {
+        return 0;  // Sensor fault
+    }
+
+    // Read vital signs from sensor
+    latest_hr = i2c_read_register(SENSOR_I2C_ADDR, SENSOR_REG_HR);
+    latest_spo2 = i2c_read_register(SENSOR_I2C_ADDR, SENSOR_REG_SPO2);
+    latest_temp_int = i2c_read_register(SENSOR_I2C_ADDR, SENSOR_REG_TEMP_INT);
+    latest_temp_frac = i2c_read_register(SENSOR_I2C_ADDR, SENSOR_REG_TEMP_FRC);
+
+    return 1;  // Success
 }
 
 /* ============================================================
@@ -369,7 +380,30 @@ uint8_t read_vitals(void) {
  *      -> If previous state was CRITICAL, call alarm_off()
  * ============================================================ */
 void check_thresholds(void) {
-    // TODO: Your code here
+    // Combine temperature into tenths for easy comparison
+    uint16_t temp_tenths = (uint16_t)latest_temp_int * 10 + latest_temp_frac;
+
+    // Check CRITICAL thresholds first (highest priority)
+    if (latest_spo2 < SPO2_CRITICAL || temp_tenths > TEMP_CRITICAL ||
+        latest_hr < HR_CRITICAL_LOW || latest_hr > HR_CRITICAL_HIGH) {
+        current_state = STATE_CRITICAL;
+        alarm_on();  // Safety-critical: activate alarm immediately
+    }
+    // Check WARNING thresholds
+    else if (latest_spo2 <= SPO2_WARNING || temp_tenths >= TEMP_WARNING ||
+             latest_hr < HR_WARNING_LOW || latest_hr > HR_WARNING_HIGH) {
+        if (current_state == STATE_CRITICAL) {
+            alarm_off();  // De-escalate from critical
+        }
+        current_state = STATE_WARNING;
+    }
+    // NORMAL: all values in safe range
+    else {
+        if (current_state == STATE_CRITICAL) {
+            alarm_off();  // Clear alarm when returning to normal
+        }
+        current_state = STATE_NORMAL;
+    }
 }
 
 /* ============================================================
@@ -427,7 +461,23 @@ void check_thresholds(void) {
  * registers are inaccessible until the peripheral clock is on.
  * ============================================================ */
 void timer_init(void) {
-    // TODO: Your code here
+    // Enable TIM2 peripheral clock
+    RCC_APB1ENR |= (1 << 0);
+
+    // Configure prescaler: 84MHz / 8400 = 10kHz tick rate
+    TIM2_PSC = 8399;
+
+    // Configure auto-reload: 2000 ticks @ 10kHz = 200ms period
+    TIM2_ARR = 1999;
+
+    // Enable update interrupt
+    TIM2_DIER |= TIM_DIER_UIE;
+
+    // Enable TIM2 interrupt in NVIC (bit 28)
+    NVIC_ISER0 |= (1 << 28);
+
+    // Start timer
+    TIM2_CR1 |= TIM_CR1_CEN;
 }
 
 /* ============================================================
@@ -458,7 +508,22 @@ void timer_init(void) {
  *   e) Set new_data_flag = 1 so main loop knows to print
  * ============================================================ */
 void TIM2_IRQHandler(void) {
-    // TODO: Your code here
+    // Clear interrupt flag FIRST to avoid re-entry
+    TIM2_SR &= ~TIM_SR_UIF;
+
+    // Read vital signs from sensor
+    if (!read_vitals()) {
+        current_state = STATE_SENSOR_FAULT;
+        alarm_on();  // Fail-safe: activate alarm on sensor fault
+    } else {
+        check_thresholds();  // Update state and alarm
+    }
+
+    // Increment sample counter
+    sample_count++;
+
+    // Signal main loop that new data is available
+    new_data_flag = 1;
 }
 
 /* ============================================================
