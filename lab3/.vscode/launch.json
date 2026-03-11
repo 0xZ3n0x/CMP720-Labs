@@ -1,0 +1,22 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug application in Renode (Cortex-Debug)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "servertype": "external",
+            "gdbTarget": "localhost:3333",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/safepulse.elf",
+            "svdFile": "${workspaceFolder}/STM32F407.svd",
+            "preLaunchTask": "Run Renode",
+            "postDebugTask": "Close Renode",
+            "runToEntryPoint": "main",
+            "overrideLaunchCommands": [
+                "monitor reset",
+                "load"
+            ]
+        }
+    ]
+}
