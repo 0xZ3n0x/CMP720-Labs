@@ -17,7 +17,7 @@
         {
             "label": "Run Renode",
             "type": "shell",
-            "command": "export LC_ALL=C.UTF-8 && renode ${workspaceFolder}/safepulse.resc",
+            "command": "renode ${workspaceFolder}/safepulse.resc",
             "dependsOn": [
                 "Build application"
             ],
