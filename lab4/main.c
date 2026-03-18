@@ -159,9 +159,9 @@ K_MSGQ_DEFINE(vitals_msgq, sizeof(vitals_msg_t), 8, 4);
  *
  * Leave gaps between numbers for future tasks.
  * ============================================================ */
-#define PROCESSING_PRIORITY   5   /* TODO: Set appropriate priority */
-#define SENSOR_PRIORITY       5   /* TODO: Set appropriate priority */
-#define LOGGING_PRIORITY      5   /* TODO: Set appropriate priority */
+#define PROCESSING_PRIORITY   2   /* Highest - safety-critical alarm */
+#define SENSOR_PRIORITY       5   /* Medium - periodic sampling */
+#define LOGGING_PRIORITY      8   /* Lowest - non-critical display */
 
 /* ============================================================
  * I2C Driver (provided - same as Week 4)
@@ -267,11 +267,29 @@ static const char *state_name(system_state_t s) {
 void sensor_task_fn(void *p1, void *p2, void *p3) {
     ARG_UNUSED(p1); ARG_UNUSED(p2); ARG_UNUSED(p3);
     uint32_t sample_id = 0;
+    vitals_msg_t msg;
 
-    /* TODO: Start the sensor timer here */
+    k_timer_start(&sensor_timer, K_MSEC(200), K_MSEC(200));
 
     while (1) {
-        /* TODO: Your code here */
+        k_timer_status_sync(&sensor_timer);
+
+        uint8_t sensor_id = i2c_read_register(SENSOR_I2C_ADDR, SENSOR_REG_ID);
+
+        if (sensor_id == 0xA5) {
+            msg.heart_rate = i2c_read_register(SENSOR_I2C_ADDR, SENSOR_REG_HR);
+            msg.spo2 = i2c_read_register(SENSOR_I2C_ADDR, SENSOR_REG_SPO2);
+            msg.temp_int = i2c_read_register(SENSOR_I2C_ADDR, SENSOR_REG_TEMP_INT);
+            msg.temp_frac = i2c_read_register(SENSOR_I2C_ADDR, SENSOR_REG_TEMP_FRC);
+            msg.sensor_ok = 1;
+        } else {
+            memset(&msg, 0, sizeof(vitals_msg_t));
+            msg.sensor_ok = 0;
+        }
+
+        msg.sample_id = sample_id;
+        msg.sensor_cycles = k_cycle_get_32();
+        k_msgq_put(&vitals_msgq, &msg, K_NO_WAIT);
 
         sample_id++;
     }
@@ -313,9 +331,52 @@ void sensor_task_fn(void *p1, void *p2, void *p3) {
  * ============================================================ */
 void processing_task_fn(void *p1, void *p2, void *p3) {
     ARG_UNUSED(p1); ARG_UNUSED(p2); ARG_UNUSED(p3);
+    vitals_msg_t msg;
+    system_state_t prev_state = STATE_NORMAL;
 
     while (1) {
-        /* TODO: Your code here */
+        k_msgq_get(&vitals_msgq, &msg, K_FOREVER);
+
+        uint32_t proc_start = k_cycle_get_32();
+        uint32_t sched_delay_us = k_cyc_to_us_floor32(proc_start - msg.sensor_cycles);
+
+        system_state_t new_state;
+        if (!msg.sensor_ok) {
+            new_state = STATE_SENSOR_FAULT;
+        } else if (msg.spo2 < SPO2_CRITICAL || msg.temp_int >= TEMP_CRITICAL ||
+                   msg.heart_rate < HR_CRITICAL_LOW || msg.heart_rate > HR_CRITICAL_HIGH) {
+            new_state = STATE_CRITICAL;
+        } else if (msg.spo2 <= SPO2_WARNING || msg.temp_int >= TEMP_WARNING ||
+                   msg.heart_rate < HR_WARNING_LOW || msg.heart_rate > HR_WARNING_HIGH) {
+            new_state = STATE_WARNING;
+        } else {
+            new_state = STATE_NORMAL;
+        }
+
+        if (new_state == STATE_CRITICAL || new_state == STATE_SENSOR_FAULT) {
+            alarm_on();
+        } else if (prev_state == STATE_CRITICAL || prev_state == STATE_SENSOR_FAULT) {
+            alarm_off();
+        }
+
+        uint32_t alarm_time = k_cycle_get_32();
+        uint32_t alarm_latency_us = k_cyc_to_us_floor32(alarm_time - msg.sensor_cycles);
+        uint32_t proc_time_us = k_cyc_to_us_floor32(alarm_time - proc_start);
+
+        current_state = new_state;
+
+        k_mutex_lock(&log_mutex, K_FOREVER);
+        log_vitals = msg;
+        log_state = new_state;
+        log_sched_delay_us = sched_delay_us;
+        log_proc_time_us = proc_time_us;
+        log_alarm_latency_us = alarm_latency_us;
+        k_mutex_unlock(&log_mutex);
+
+        if (new_state != prev_state) {
+            k_sem_give(&state_change_sem);
+            prev_state = new_state;
+        }
     }
 }
 
@@ -357,11 +418,66 @@ void logging_task_fn(void *p1, void *p2, void *p3) {
     ARG_UNUSED(p1); ARG_UNUSED(p2); ARG_UNUSED(p3);
 
     system_state_t prev_state = STATE_NORMAL;
+    vitals_msg_t snapshot;
+    system_state_t snapshot_state;
+    uint32_t snapshot_sched, snapshot_proc, snapshot_alarm;
 
-    /* TODO: Set up k_poll events and start log timer */
+    struct k_poll_event events[2] = {
+        K_POLL_EVENT_INITIALIZER(K_POLL_TYPE_SEM_AVAILABLE,
+                                 K_POLL_MODE_NOTIFY_ONLY,
+                                 &state_change_sem),
+        K_POLL_EVENT_INITIALIZER(K_POLL_TYPE_SIGNAL,
+                                 K_POLL_MODE_NOTIFY_ONLY,
+                                 &log_timer_signal),
+    };
+
+    k_timer_start(&log_timer, K_MSEC(1000), K_MSEC(1000));
 
     while (1) {
-        /* TODO: Your code here */
+        k_poll(events, 2, K_FOREVER);
+
+        if (events[0].state == K_POLL_STATE_SEM_AVAILABLE) {
+            k_sem_take(&state_change_sem, K_NO_WAIT);
+            events[0].state = K_POLL_STATE_NOT_READY;
+        }
+        if (events[1].state == K_POLL_STATE_SIGNALED) {
+            k_poll_signal_reset(&log_timer_signal);
+            events[1].state = K_POLL_STATE_NOT_READY;
+        }
+
+        k_mutex_lock(&log_mutex, K_FOREVER);
+        snapshot = log_vitals;
+        snapshot_state = log_state;
+        snapshot_sched = log_sched_delay_us;
+        snapshot_proc = log_proc_time_us;
+        snapshot_alarm = log_alarm_latency_us;
+        k_mutex_unlock(&log_mutex);
+
+        if (snapshot_state != prev_state) {
+            if (snapshot_state == STATE_CRITICAL) {
+                printk("[ALARM] CRITICAL: SpO2=%d, HR=%d\n", snapshot.spo2, snapshot.heart_rate);
+            } else if (snapshot_state == STATE_WARNING) {
+                printk("[ALARM] WARNING: SpO2=%d, HR=%d\n", snapshot.spo2, snapshot.heart_rate);
+            } else if (snapshot_state == STATE_SENSOR_FAULT) {
+                printk("[ALARM] SENSOR FAULT\n");
+            } else if (snapshot_state == STATE_NORMAL) {
+                printk("[ALARM] NORMAL: All vitals OK\n");
+            }
+            prev_state = snapshot_state;
+        }
+
+        printk("[%03u] HR=%3d SpO2=%3d T=%d.%d [sched=%u us, proc=%u us, alarm=%u us]\n",
+               snapshot.sample_id, snapshot.heart_rate, snapshot.spo2,
+               snapshot.temp_int, snapshot.temp_frac,
+               snapshot_sched, snapshot_proc, snapshot_alarm);
+
+        if (snapshot_state == STATE_WARNING || snapshot_state == STATE_CRITICAL) {
+            k_timer_stop(&log_timer);
+            k_timer_start(&log_timer, K_MSEC(500), K_MSEC(500));
+        } else {
+            k_timer_stop(&log_timer);
+            k_timer_start(&log_timer, K_MSEC(1000), K_MSEC(1000));
+        }
     }
 }
 
