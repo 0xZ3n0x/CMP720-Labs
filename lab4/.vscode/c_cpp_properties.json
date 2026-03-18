@@ -1,0 +1,33 @@
+{
+    "configurations": [
+        {
+            "name": "Zephyr",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/build/zephyr/include",
+                "${workspaceFolder}/build/modules/hal_stm32/stm32cube/stm32f4xx",
+                "${env:HOME}/zephyrproject/zephyr/include",
+                "${env:HOME}/zephyrproject/zephyr/arch/arm/include",
+                "${env:HOME}/zephyrproject/zephyr/lib/libc/include",
+                "${env:HOME}/zephyrproject/zephyr/drivers/include",
+                "${env:HOME}/zephyrproject/zephyr/modules/stm32cube/stm32f4xx",
+                "${env:HOME}/zephyrproject/zephyr/modules/hal_stm32/stm32cube/stm32f4xx/drivers/include",
+                "${env:HOME}/zephyrproject/zephyr/modules/cmsis_6/CMSIS/Core/Include",
+                "${env:HOME}/zephyrproject/zephyr/soc/st/stm32",
+                "${env:HOME}/zephyrproject/zephyr/lib/libc/picolibc/include",
+                "${env:HOME}/zephyrproject/zephyr/kernel/include"
+            ],
+            "defines": [
+                "CONFIG_ARCH_POSIX",
+                "CONFIG_SOC_FAMILY_STM32",
+                "CONFIG_SOC_SERIES_STM32F4X"
+            ],
+            "compileCommands": "${workspaceFolder}/build/compile_commands.json",
+            "compilerPath": "${env:HOME}/zephyr-sdk-1.0.0/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc",
+            "cStandard": "c11",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "gcc-arm"
+        }
+    ],
+    "version": 4
+}
